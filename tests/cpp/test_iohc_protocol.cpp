@@ -81,6 +81,16 @@ static void check_u16(const char *name, uint16_t expected, uint16_t actual) {
   }
 }
 
+static void check_size(const char *name, size_t expected, size_t actual) {
+  g_checks++;
+  if (expected == actual) {
+    std::printf("  PASS  %-28s %zu\n", name, actual);
+  } else {
+    g_failures++;
+    std::printf("  FAIL  %-28s got=%zu want=%zu\n", name, actual, expected);
+  }
+}
+
 int main() {
   std::printf("io-homecontrol protocol golden-vector tests\n");
 
@@ -220,6 +230,48 @@ int main() {
     std::vector<uint8_t> decoded;
     size_t n = iohc_proto::uart_decode(packed.data(), packed.size(), decoded);
     check_bytes("phy round-trip", frame, decoded.data(), n);
+  }
+
+  // 9) 1W link-layer fragmentation (EXPERIMENTAL/UNVERIFIED -- see the notes
+  //    on iohc_proto::fragment_1w_frame() in iohc_protocol.h).
+  {
+    // 9a) A body that fits in one frame (<=31 bytes) must be unchanged:
+    //     exactly one frame, order=SINGLE (0b11)/isOneWay=1/size=body length,
+    //     body bytes untouched, CRC appended -- identical to the
+    //     pre-fragmentation single-frame encoding.
+    auto body = hx("00 00 00 3F 1A 38 0B 00 01 61 00 00 80 D8 05 00 02 A6 24 22 2E");  // 22 arbitrary bytes
+    auto frames = iohc_proto::fragment_1w_frame(body.data(), body.size());
+    check_size("fragment: single count", 1, frames.size());
+    check_u16("fragment: single ctrl0", static_cast<uint16_t>(0xE0 | (body.size() & 0x1F)), frames[0][0]);
+    check_bytes("fragment: single body", body, frames[0].data() + 1, body.size());
+    check_u16("fragment: single crc->0", 0x0000, iohc_proto::crc16(frames[0].data(), frames[0].size()));
+
+    // 9b) The real CMD_WRITE_PRIVATE case: a 34-byte body (3 over the
+    //     31-byte limit) taken from the golden 0x30 frame above (ctrl0..CRC
+    //     stripped). Must split into 2 correctly ordered/flagged fragments
+    //     that reassemble to the exact original body.
+    auto full_frame = hx("fc0000003fabcdef307e60491f976adf653db0ed785e49a2010201123419e81ec43d5e9bf2");
+    std::vector<uint8_t> wp_body(full_frame.begin() + 1, full_frame.end() - 2);
+    check_size("fragment: wp body size", 34, wp_body.size());
+
+    auto wp_frames = iohc_proto::fragment_1w_frame(wp_body.data(), wp_body.size());
+    check_size("fragment: wp count", 2, wp_frames.size());
+
+    // Fragment 0: order=01 (First, more follow), isOneWay=1, size=31.
+    check_u16("fragment[0] ctrl0", static_cast<uint16_t>((0b01 << 6) | 0x20 | 31), wp_frames[0][0]);
+    // Fragment 1: order=10 (Last), isOneWay=1, size=3 (34-31 remaining).
+    check_u16("fragment[1] ctrl0", static_cast<uint16_t>((0b10 << 6) | 0x20 | 3), wp_frames[1][0]);
+
+    // Each physical frame checksums to 0 over itself (independent CRC).
+    check_u16("fragment[0] crc->0", 0x0000, iohc_proto::crc16(wp_frames[0].data(), wp_frames[0].size()));
+    check_u16("fragment[1] crc->0", 0x0000, iohc_proto::crc16(wp_frames[1].data(), wp_frames[1].size()));
+
+    // Reassembling the fragment data (stripping each fragment's own ctrl0
+    // and CRC) must recover the exact original 34-byte body.
+    std::vector<uint8_t> reassembled;
+    for (auto &fr : wp_frames)
+      reassembled.insert(reassembled.end(), fr.begin() + 1, fr.end() - 2);
+    check_bytes("fragment reassembly", wp_body, reassembled.data(), reassembled.size());
   }
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

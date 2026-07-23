@@ -97,6 +97,54 @@ void uart_encode(const uint8_t *logical, size_t len, std::vector<uint8_t> &out);
 // bit) or when fewer than 10 bits remain. Returns the number of bytes decoded.
 size_t uart_decode(const uint8_t *payload, size_t len, std::vector<uint8_t> &out);
 
+// --- 1W link-layer fragmentation --------------------------------------------
+//
+// A 1W physical frame's ctrl0 "size" field is only 5 bits (max 31), counting
+// everything between ctrl0 and the trailing CRC (ctrl1..MAC per
+// docs/linklayer.md in the Velocet/iown-homecontrol reference). A handful of
+// 1W commands -- notably CMD_WRITE_PRIVATE's 18-byte key payload, which
+// produces a 34-byte body -- exceed that limit.
+//
+// *** EXPERIMENTAL / UNVERIFIED -- see PR description before relying on this
+// for pairing against real hardware. ***
+//
+// io-homecontrol's public documentation only describes ctrl0's 2-bit "Order"
+// field in the context of grouping separate *commands* within a session
+// (Single / Next-in-Series / Next-in-Parallel / Command-Group-End), not
+// splitting the body of one oversized command across multiple physical
+// frames. No known documented or captured reference covers that case, and
+// the one worked multi-frame example found in the reference docs is
+// internally inconsistent with the docs' own field definitions. The scheme
+// implemented here is a best-effort re-use of the Order field's First/Last
+// "session frame" semantics repurposed for body fragmentation:
+//
+//   order = 0b11 (Single)             -- body fits in one frame, unfragmented
+//                                         (bit-identical to a non-fragmented
+//                                         frame; this is the unchanged path)
+//   order = 0b01 (First, more follow) -- first fragment of a split body
+//   order = 0b00 (Middle)             -- continuation fragment (neither
+//                                         first nor last)
+//   order = 0b10 (Last)               -- final fragment of a split body
+//
+// Fragmentation splits the raw assembled logical body (ctrl1..MAC) at
+// 31-byte boundaries; each fragment gets its own ctrl0 (order + isOneWay +
+// size) and its own CRC-16-KERMIT trailer, computed the same way a
+// non-fragmented frame's CRC is computed. There is no known reassembly
+// mechanism on the receiving actuator confirmed for this case -- this has
+// NOT been verified against a real io-homecontrol motor.
+
+// Maximum body length (everything after ctrl0, excluding the trailing CRC) a
+// single 1W physical frame can carry -- the ctrl0 size field is 5 bits wide.
+static constexpr size_t IOHC_1W_MAX_BODY = 0x1F;  // 31
+
+// Split an assembled 1W logical body (ctrl1 || dest || src || cmd || data ||
+// seq || mac) into one or more physical frames, each carrying its own ctrl0
+// and CRC. If body_len <= IOHC_1W_MAX_BODY, returns exactly one frame using
+// order=SINGLE (0b11), byte-identical to the pre-fragmentation encoding.
+// Otherwise splits into IOHC_1W_MAX_BODY-sized chunks (last chunk may be
+// shorter) with order bits marking first/middle/last per the scheme above.
+std::vector<std::vector<uint8_t>> fragment_1w_frame(const uint8_t *body, size_t body_len);
+
 }  // namespace iohc_proto
 }  // namespace somfy
 }  // namespace esphome
