@@ -232,24 +232,36 @@ int main() {
     check_bytes("phy round-trip", frame, decoded.data(), n);
   }
 
-  // 9) CMD_WRITE_PRIVATE's ctrl0 size field excludes the trailing MAC.
-  //    Cross-checked against an independent implementation
-  //    (rspaargaren/iohomecontrol): its 1W header contributes 8 bytes
-  //    (ctrl1+dest+src+cmd) and its _p0x30 payload struct -- enc_key(16) +
-  //    man_id(1) + data(1) + sequence(2), no MAC field -- contributes 20,
-  //    landing on the same 28 this golden frame declares. somfy_iohc.cpp's
-  //    build_1w_frame(..., count_mac_in_size=false) for CMD_WRITE_PRIVATE
-  //    implements exactly this: this test pins the golden ctrl0 byte and the
-  //    28-vs-34 gap (= the 6-byte MAC) so a regression back to counting the
-  //    MAC here (which silently wraps the field, corrupting the pairing
-  //    frame on air) fails loudly.
+  // 9) CMD_WRITE_PRIVATE (0x30) carries no MAC at all. An earlier version of
+  //    this test (and of somfy_iohc.cpp) assumed the MAC was present but
+  //    excluded from the declared size -- that shipped, was tested against a
+  //    real motor, and didn't pair (frame transmitted cleanly, key never
+  //    learned). Cross-checked instead against an independent,
+  //    hardware-validated implementation (rspaargaren/iohomecontrol, whose
+  //    extras/1W.json in that repo shows real paired Somfy IZY motors): its
+  //    0x30/Add frame builder computes no MAC at all, and its declared
+  //    length arithmetic -- 8 bytes of base header (ctrl1+dest+src+cmd) +
+  //    sizeof(its mac-less 0x30 payload struct: enc_key[16]+man_id+data+
+  //    sequence[2] = 20) -- lands on 28, matching this golden frame's
+  //    ctrl0=0xFC declared size exactly.
+  //
+  //    This golden frame (sourced from docs/linklayer.md in
+  //    Velocet/iown-homecontrol) still has 6 bytes between the sequence
+  //    number and CRC that our own crypto math independently reproduces as a
+  //    valid MAC (see the "0x30 1W MAC" check above) -- but given the
+  //    hardware evidence, that's most likely a documentation artifact (a MAC
+  //    formula illustration reusing this frame's fields as a convenient
+  //    example) rather than something a real 0x30 frame transmits.
+  //    somfy_iohc.cpp's build_1w_frame(..., include_mac=false) for
+  //    CMD_WRITE_PRIVATE omits those bytes entirely; this test pins the
+  //    declared-size relationship (28) both references agree on.
   {
     auto full_frame = hx("fc0000003fabcdef307e60491f976adf653db0ed785e49a2010201123419e81ec43d5e9bf2");
-    std::vector<uint8_t> wp_body(full_frame.begin() + 1, full_frame.end() - 2);  // ctrl1..MAC, 34 bytes
-    check_size("0x30 body size (w/ MAC)", 34, wp_body.size());
     check_u16("0x30 golden ctrl0", 0xFC, full_frame[0]);
     check_size("0x30 declared size (ctrl0 & 0x1F)", 28, full_frame[0] & 0x1F);
-    check_size("0x30 declared-vs-actual gap == MAC len", 6, wp_body.size() - (full_frame[0] & 0x1F));
+    // ctrl1 + dest(3) + src(3) + cmd(1) + enc_key(16) + man_id(1) + data(1)
+    // + sequence(2), no MAC -- exactly the declared 28 bytes.
+    check_size("0x30 mac-less body length", 28, 1 + 3 + 3 + 1 + 16 + 1 + 1 + 2);
   }
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

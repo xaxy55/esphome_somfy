@@ -250,18 +250,16 @@ void SomfyIohcCover::program() {
   // Step 2: CMD_WRITE_PRIVATE (0x30) pushes the controller key. The key is
   // obfuscated with the public transfer key (keystream = AES(transfer_key, IV)
   // where IV is the controller node address repeated), then the on-air data is
-  // enc_key(16) || manufacturer(0x02 = Somfy) || key-index(0x01). Only
-  // cmd || enc_key (17 bytes) is authenticated by the MAC; the manufacturer
-  // trailer is not. This command's ctrl0 size field excludes the trailing MAC
-  // (count_mac_in_size=false) -- see the comment on build_1w_frame()'s
-  // declaration for why.
+  // enc_key(16) || manufacturer(0x02 = Somfy) || key-index(0x01). This frame
+  // carries no MAC (include_mac=false) -- see the comment on
+  // build_1w_frame()'s declaration for why.
   uint8_t key_data[18];
   iohc_proto::obfuscate_key_1w(aes128_ecb_encrypt, iohc_keys::TRANSFER_KEY, this->node_id_,
                                this->encryption_key_, key_data);
   key_data[16] = 0x02;  // manufacturer: Somfy
   key_data[17] = 0x01;  // key index
   auto frame_key = this->build_1w_frame(iohc_cmd::CMD_WRITE_PRIVATE, key_data, sizeof(key_data),
-                                        iohc::BROADCAST_ADDR, 16, /*count_mac_in_size=*/false);
+                                        iohc::BROADCAST_ADDR, SIZE_MAX, /*include_mac=*/false);
   ESP_LOGD(TAG, "PROG: tx CMD_WRITE_PRIVATE (0x%02X), %u bytes (key omitted)",
            iohc_cmd::CMD_WRITE_PRIVATE, static_cast<unsigned>(frame_key.size()));
   this->hub_->transmit_packet(frame_key, static_cast<uint8_t>(this->repeat_count_));
@@ -330,8 +328,7 @@ void SomfyIohcCover::on_2w_result_(bool success, const IohcDecodedPacket *respon
 }
 
 std::vector<uint8_t> SomfyIohcCover::build_1w_frame(uint8_t cmd, const uint8_t *data, size_t data_len,
-                                                      uint32_t dest_node, size_t auth_len,
-                                                      bool count_mac_in_size) {
+                                                      uint32_t dest_node, size_t auth_len, bool include_mac) {
   if (auth_len == SIZE_MAX || auth_len > data_len)
     auth_len = data_len;
 
@@ -341,7 +338,7 @@ std::vector<uint8_t> SomfyIohcCover::build_1w_frame(uint8_t cmd, const uint8_t *
   frame.reserve(2 + 6 + 1 + data_len + 2 + 6 + 2);
 
   // CtrlByte0 placeholder — the size field depends on the final body length and
-  // is filled in once the body (ctrl1..MAC) is assembled.
+  // is filled in once the body (ctrl1..MAC, if any) is assembled.
   frame.push_back(0x00);
   // CtrlByte1: 1W frames carry no Start/End framing bits (0x00).
   frame.push_back(0x00);
@@ -364,33 +361,33 @@ std::vector<uint8_t> SomfyIohcCover::build_1w_frame(uint8_t cmd, const uint8_t *
     frame.push_back(data[i]);
   }
 
-  // Sequence (2 bytes, big-endian) — sits between the data and the MAC.
+  // Sequence (2 bytes, big-endian) — sits between the data and the MAC (if any).
   frame.push_back(static_cast<uint8_t>(sequence >> 8));
   frame.push_back(static_cast<uint8_t>(sequence & 0xFF));
 
-  // Size field measured here, before the MAC is appended -- used only when
-  // count_mac_in_size is false (currently just CMD_WRITE_PRIVATE).
-  const size_t size_field_pre_mac = frame.size() - 1;
-
   // MAC (6 bytes) over the authenticated payload cmd || data[0..auth_len).
-  uint8_t mac_payload[1 + 16];
-  size_t mac_payload_len = 1 + auth_len;
-  mac_payload[0] = cmd;
-  memcpy(mac_payload + 1, data, auth_len);
+  // include_mac is false only for CMD_WRITE_PRIVATE: cross-checked against an
+  // independent io-homecontrol implementation (rspaargaren/iohomecontrol,
+  // whose paired-device state file shows real, working Somfy IZY pairings),
+  // whose 0x30/Add frame builder computes no MAC at all for this command.
+  if (include_mac) {
+    uint8_t mac_payload[1 + 16];
+    size_t mac_payload_len = 1 + auth_len;
+    mac_payload[0] = cmd;
+    memcpy(mac_payload + 1, data, auth_len);
 
-  uint8_t iv[16];
-  iohc_proto::build_iv_1w(mac_payload, mac_payload_len, sequence, iv);
-  uint8_t mac[6];
-  iohc_proto::compute_mac(aes128_ecb_encrypt, this->encryption_key_, iv, mac);
-  for (int i = 0; i < 6; i++) {
-    frame.push_back(mac[i]);
+    uint8_t iv[16];
+    iohc_proto::build_iv_1w(mac_payload, mac_payload_len, sequence, iv);
+    uint8_t mac[6];
+    iohc_proto::compute_mac(aes128_ecb_encrypt, this->encryption_key_, iv, mac);
+    for (int i = 0; i < 6; i++) {
+      frame.push_back(mac[i]);
+    }
   }
 
   // CtrlByte0: order=11, isOneWay=1, size = body length (everything after
-  // ctrl0, excluding the trailing CRC) masked to 5 bits. count_mac_in_size
-  // decides whether the just-appended MAC counts towards that length --
-  // see the comment on this function's declaration in somfy_iohc.h.
-  const size_t size_field = count_mac_in_size ? (frame.size() - 1) : size_field_pre_mac;
+  // ctrl0, excluding the trailing CRC) masked to 5 bits.
+  const size_t size_field = frame.size() - 1;
   if (size_field > 0x1F) {
     ESP_LOGW(TAG, "1W frame cmd=0x%02X size field=%u B exceeds the 31-byte 1W limit; wraps to %u",
              cmd, static_cast<unsigned>(size_field), static_cast<unsigned>(size_field & 0x1F));
