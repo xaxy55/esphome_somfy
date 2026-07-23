@@ -133,18 +133,23 @@ class SomfyIohcCover : public SomfyTimeBasedCover {
 
   // 1W Protocol (per-device: uses device key + rolling code)
   void send_1w_command(uint16_t main_param);
-  // Build one or more complete 1W physical frames for a command. The MAC
-  // authenticates cmd || data[0..auth_len); auth_len defaults to the full
-  // data length. The 0x30 key-push frame uses a shorter auth_len because its
-  // trailing manufacturer bytes are not authenticated.
+  // Build a complete 1W frame. The MAC authenticates cmd || data[0..auth_len);
+  // auth_len defaults to the full data length. The 0x30 key-push frame uses a
+  // shorter auth_len because its trailing manufacturer bytes are not
+  // authenticated.
   //
-  // Normally returns a single frame. If the assembled body exceeds the
-  // 31-byte 1W size-field limit (e.g. the 0x30 key-push frame), returns
-  // multiple linked fragments instead of a single corrupt frame -- see the
-  // EXPERIMENTAL/UNVERIFIED note on iohc_proto::fragment_1w_frame(). Callers
-  // must transmit every returned frame, in order.
-  std::vector<std::vector<uint8_t>> build_1w_frames(uint8_t cmd, const uint8_t *data, size_t data_len,
-                                                     uint32_t dest_node, size_t auth_len = SIZE_MAX);
+  // count_mac_in_size controls whether the ctrl0 5-bit size field counts the
+  // trailing 6-byte MAC. It does for every command except CMD_WRITE_PRIVATE
+  // (0x30): cross-checked against a golden 0x30 frame (ctrl0=0xFC, size=28)
+  // in tests/cpp/test_iohc_protocol.cpp and against an independent
+  // io-homecontrol implementation (rspaargaren/iohomecontrol), whose 0x30
+  // payload struct/length arithmetic both land on the same 28 -- i.e. this
+  // command's declared size only covers ctrl1..sequence, not the MAC that
+  // follows it. Get this wrong and the size field silently wraps: 0x30's
+  // 34-byte body (18-byte key payload) would otherwise overflow the 31-byte
+  // limit and corrupt the pairing frame on air.
+  std::vector<uint8_t> build_1w_frame(uint8_t cmd, const uint8_t *data, size_t data_len, uint32_t dest_node,
+                                      size_t auth_len = SIZE_MAX, bool count_mac_in_size = true);
 
   // 2W Protocol (uses challenge/response via hub session)
   void send_2w_command(uint16_t main_param);

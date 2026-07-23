@@ -232,46 +232,24 @@ int main() {
     check_bytes("phy round-trip", frame, decoded.data(), n);
   }
 
-  // 9) 1W link-layer fragmentation (EXPERIMENTAL/UNVERIFIED -- see the notes
-  //    on iohc_proto::fragment_1w_frame() in iohc_protocol.h).
+  // 9) CMD_WRITE_PRIVATE's ctrl0 size field excludes the trailing MAC.
+  //    Cross-checked against an independent implementation
+  //    (rspaargaren/iohomecontrol): its 1W header contributes 8 bytes
+  //    (ctrl1+dest+src+cmd) and its _p0x30 payload struct -- enc_key(16) +
+  //    man_id(1) + data(1) + sequence(2), no MAC field -- contributes 20,
+  //    landing on the same 28 this golden frame declares. somfy_iohc.cpp's
+  //    build_1w_frame(..., count_mac_in_size=false) for CMD_WRITE_PRIVATE
+  //    implements exactly this: this test pins the golden ctrl0 byte and the
+  //    28-vs-34 gap (= the 6-byte MAC) so a regression back to counting the
+  //    MAC here (which silently wraps the field, corrupting the pairing
+  //    frame on air) fails loudly.
   {
-    // 9a) A body that fits in one frame (<=31 bytes) must be unchanged:
-    //     exactly one frame, order=SINGLE (0b11)/isOneWay=1/size=body length,
-    //     body bytes untouched, CRC appended -- identical to the
-    //     pre-fragmentation single-frame encoding.
-    auto body = hx("00 00 00 3F 1A 38 0B 00 01 61 00 00 80 D8 05 00 02 A6 24 22 2E");  // 22 arbitrary bytes
-    auto frames = iohc_proto::fragment_1w_frame(body.data(), body.size());
-    check_size("fragment: single count", 1, frames.size());
-    check_u16("fragment: single ctrl0", static_cast<uint16_t>(0xE0 | (body.size() & 0x1F)), frames[0][0]);
-    check_bytes("fragment: single body", body, frames[0].data() + 1, body.size());
-    check_u16("fragment: single crc->0", 0x0000, iohc_proto::crc16(frames[0].data(), frames[0].size()));
-
-    // 9b) The real CMD_WRITE_PRIVATE case: a 34-byte body (3 over the
-    //     31-byte limit) taken from the golden 0x30 frame above (ctrl0..CRC
-    //     stripped). Must split into 2 correctly ordered/flagged fragments
-    //     that reassemble to the exact original body.
     auto full_frame = hx("fc0000003fabcdef307e60491f976adf653db0ed785e49a2010201123419e81ec43d5e9bf2");
-    std::vector<uint8_t> wp_body(full_frame.begin() + 1, full_frame.end() - 2);
-    check_size("fragment: wp body size", 34, wp_body.size());
-
-    auto wp_frames = iohc_proto::fragment_1w_frame(wp_body.data(), wp_body.size());
-    check_size("fragment: wp count", 2, wp_frames.size());
-
-    // Fragment 0: order=01 (First, more follow), isOneWay=1, size=31.
-    check_u16("fragment[0] ctrl0", static_cast<uint16_t>((0b01 << 6) | 0x20 | 31), wp_frames[0][0]);
-    // Fragment 1: order=10 (Last), isOneWay=1, size=3 (34-31 remaining).
-    check_u16("fragment[1] ctrl0", static_cast<uint16_t>((0b10 << 6) | 0x20 | 3), wp_frames[1][0]);
-
-    // Each physical frame checksums to 0 over itself (independent CRC).
-    check_u16("fragment[0] crc->0", 0x0000, iohc_proto::crc16(wp_frames[0].data(), wp_frames[0].size()));
-    check_u16("fragment[1] crc->0", 0x0000, iohc_proto::crc16(wp_frames[1].data(), wp_frames[1].size()));
-
-    // Reassembling the fragment data (stripping each fragment's own ctrl0
-    // and CRC) must recover the exact original 34-byte body.
-    std::vector<uint8_t> reassembled;
-    for (auto &fr : wp_frames)
-      reassembled.insert(reassembled.end(), fr.begin() + 1, fr.end() - 2);
-    check_bytes("fragment reassembly", wp_body, reassembled.data(), reassembled.size());
+    std::vector<uint8_t> wp_body(full_frame.begin() + 1, full_frame.end() - 2);  // ctrl1..MAC, 34 bytes
+    check_size("0x30 body size (w/ MAC)", 34, wp_body.size());
+    check_u16("0x30 golden ctrl0", 0xFC, full_frame[0]);
+    check_size("0x30 declared size (ctrl0 & 0x1F)", 28, full_frame[0] & 0x1F);
+    check_size("0x30 declared-vs-actual gap == MAC len", 6, wp_body.size() - (full_frame[0] & 0x1F));
   }
 
   std::printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

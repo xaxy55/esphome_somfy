@@ -1,6 +1,5 @@
 #include "iohc_protocol.h"
 
-#include <algorithm>
 #include <cstring>
 
 namespace esphome {
@@ -171,52 +170,6 @@ size_t uart_decode(const uint8_t *payload, size_t len, std::vector<uint8_t> &out
     out.push_back(b);
   }
   return out.size();
-}
-
-std::vector<std::vector<uint8_t>> fragment_1w_frame(const uint8_t *body, size_t body_len) {
-  // Order values for ctrl0 bits[7:6] -- see the EXPERIMENTAL note in the
-  // header for what these mean here and why they're unverified.
-  constexpr uint8_t ORDER_SINGLE = 0b11;
-  constexpr uint8_t ORDER_FIRST = 0b01;
-  constexpr uint8_t ORDER_MIDDLE = 0b00;
-  constexpr uint8_t ORDER_LAST = 0b10;
-  constexpr uint8_t CTRL0_IS_ONE_WAY = 0x20;
-
-  const size_t total_fragments =
-      std::max<size_t>(1, (body_len + IOHC_1W_MAX_BODY - 1) / IOHC_1W_MAX_BODY);
-
-  std::vector<std::vector<uint8_t>> frames;
-  frames.reserve(total_fragments);
-
-  size_t offset = 0;
-  for (size_t i = 0; i < total_fragments; i++) {
-    const size_t remaining = body_len - offset;
-    const size_t chunk_len = std::min(remaining, IOHC_1W_MAX_BODY);
-
-    uint8_t order;
-    if (total_fragments == 1)
-      order = ORDER_SINGLE;
-    else if (i == 0)
-      order = ORDER_FIRST;
-    else if (i + 1 == total_fragments)
-      order = ORDER_LAST;
-    else
-      order = ORDER_MIDDLE;
-
-    std::vector<uint8_t> frame;
-    frame.reserve(1 + chunk_len + 2);
-    frame.push_back(0x00);  // ctrl0 placeholder, filled in below
-    frame.insert(frame.end(), body + offset, body + offset + chunk_len);
-    frame[0] = static_cast<uint8_t>((order << 6) | CTRL0_IS_ONE_WAY | (chunk_len & 0x1F));
-
-    uint16_t crc = crc16(frame.data(), frame.size());
-    frame.push_back(static_cast<uint8_t>(crc & 0xFF));
-    frame.push_back(static_cast<uint8_t>((crc >> 8) & 0xFF));
-
-    frames.push_back(std::move(frame));
-    offset += chunk_len;
-  }
-  return frames;
 }
 
 }  // namespace iohc_proto
