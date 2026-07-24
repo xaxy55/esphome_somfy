@@ -28,8 +28,9 @@ constexpr uint32_t RX_PUBLISH_INTERVAL_MS = 250;
 // Window over which an identical (src, main_param) command is treated as part of
 // the remote's repeat burst rather than a fresh press.
 constexpr uint32_t RX_DEDUP_WINDOW_MS = 1500;
-// Cap how many payload bytes we render to hex (foreign EXECUTE frames are short).
-constexpr size_t RX_HEX_MAX_BYTES = 16;
+// Cap how many payload bytes we render to hex. Wide enough for a foreign
+// CMD_WRITE_PRIVATE/0x30 frame's data (up to 20 bytes: enc_key+man_id+data+seq).
+constexpr size_t RX_HEX_MAX_BYTES = 24;
 
 const char *main_param_name(uint16_t mp) {
   switch (mp) {
@@ -454,6 +455,20 @@ void SomfyIohcCover::on_iohc_packet_(const IohcDecodedPacket &pkt) {
   // For 2W mode, also accept packets from our target actuator
   if (this->mode_ == IohcMode::MODE_2W && pkt.src_node != this->target_node_)
     return;
+
+#ifdef USE_SOMFY_IOHC_RX
+  // Foreign non-EXECUTE frames (e.g. a real remote's own 0x30/0x39/0x2E
+  // traffic during pairing) aren't decoded, but dumping their raw data bytes
+  // gives a ground-truth reference to compare our own frame construction
+  // against -- see the PROG/pairing investigation in the PR history.
+  if (pkt.src_node != this->node_id_) {
+    char hexbuf[RX_HEX_MAX_BYTES * 3 + 1];
+    format_payload_hex(pkt.data, pkt.data_len, hexbuf, sizeof(hexbuf));
+    ESP_LOGD(TAG, "RX for node 0x%06X: src=0x%06X cmd=0x%02X rssi=%.1f len=%u data=[%s]",
+             this->node_id_, pkt.src_node, pkt.cmd, pkt.rssi, static_cast<unsigned>(pkt.data_len), hexbuf);
+    return;
+  }
+#endif  // USE_SOMFY_IOHC_RX
 
   ESP_LOGD(TAG, "RX for node 0x%06X: src=0x%06X cmd=0x%02X rssi=%.1f",
            this->node_id_, pkt.src_node, pkt.cmd, pkt.rssi);
