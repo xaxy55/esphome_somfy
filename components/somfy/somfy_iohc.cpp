@@ -240,20 +240,23 @@ void SomfyIohcCover::program() {
   ESP_LOGI(TAG, "PROG (pair): node=0x%06X -> dest=BROADCAST(0x%06X) repeat=%d",
            this->node_id_, iohc::BROADCAST_ADDR, this->repeat_count_);
 
-  // Step 1: CMD_REMOVE_CONTROLLER (0x39) carries a single data byte (0x00).
-  uint8_t remove_data[1] = {0x00};
-  auto frame_remove =
-      this->build_1w_frame(iohc_cmd::CMD_REMOVE_CONTROLLER, remove_data, sizeof(remove_data), iohc::BROADCAST_ADDR);
-  ESP_LOGD(TAG, "PROG: tx CMD_REMOVE_CONTROLLER (0x%02X), %u bytes",
-           iohc_cmd::CMD_REMOVE_CONTROLLER, static_cast<unsigned>(frame_remove.size()));
-  this->hub_->transmit_packet(frame_remove, static_cast<uint8_t>(this->repeat_count_));
-
-  // Step 2: CMD_WRITE_PRIVATE (0x30) pushes the controller key. The key is
-  // obfuscated with the public transfer key (keystream = AES(transfer_key, IV)
-  // where IV is the controller node address repeated), then the on-air data is
-  // enc_key(16) || manufacturer(0x02 = Somfy) || key-index(0x01). This frame
-  // carries no MAC (include_mac=false) -- see the comment on
-  // build_1w_frame()'s declaration for why.
+  // CMD_WRITE_PRIVATE (0x30) pushes the controller key. No CMD_REMOVE_CONTROLLER
+  // step precedes it: in rspaargaren/iohomecontrol, Remove (0x39) and Add
+  // (0x30) are independent user actions, not a chained pair -- Remove
+  // authenticates its frame with the key an EARLIER successful pairing
+  // established (see its p0x2e/hmac construction, keyed on r.key), so it's
+  // for un-pairing an already-paired controller, not something you send
+  // before ever having a real key. Sending it first here (as this code
+  // previously did, keyed on the meaningless default transfer key since no
+  // pairing has happened yet) was untested and may have been putting the
+  // motor into a state that blocked the Add that followed -- pairing failed
+  // repeatedly against real hardware until this step was removed.
+  //
+  // The key is obfuscated with the public transfer key (keystream =
+  // AES(transfer_key, IV) where IV is the controller node address repeated),
+  // then the on-air data is enc_key(16) || manufacturer(0x02 = Somfy) ||
+  // key-index(0x01). This frame carries no MAC (include_mac=false) -- see
+  // the comment on build_1w_frame()'s declaration for why.
   uint8_t key_data[18];
   iohc_proto::obfuscate_key_1w(aes128_ecb_encrypt, iohc_keys::TRANSFER_KEY, this->node_id_,
                                this->encryption_key_, key_data);
