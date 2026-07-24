@@ -41,9 +41,14 @@ static constexpr uint8_t CMD_EXECUTE = 0x00;
 static constexpr uint8_t CMD_WRITE_PRIVATE = 0x30;
 static constexpr uint8_t CMD_REMOVE_CONTROLLER = 0x39;
 
-// Main Parameters for CMD_EXECUTE
+// Main Parameters for CMD_EXECUTE. Cross-checked against
+// rspaargaren/iohomecontrol's RemoteButton switch (src/iohcRemote1W.cpp),
+// whose 1W.json shows real paired Somfy/Velux motors: Open=0x0000,
+// Close=0xC800, Stop=0xD200 (Open and Stop already matched; Close was wrong
+// -- 0xD400 has no basis found anywhere and silently did nothing on real
+// hardware, matching the reported "close doesn't work" symptom).
 static constexpr uint16_t MP_OPEN = 0x0000;
-static constexpr uint16_t MP_CLOSE = 0xD400;
+static constexpr uint16_t MP_CLOSE = 0xC800;
 static constexpr uint16_t MP_STOP = 0xD200;
 static constexpr uint16_t MP_MY = 0xD800;
 
